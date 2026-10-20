@@ -1,0 +1,205 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: airline-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-airline_dev_pass_2026}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      # Port 3307 on host mapped to 3306 in container to prevent conflict with host Windows MySQL80
+      - "${HOST_MYSQL_PORT:-3307}:3306"
+    networks:
+      - airline-network
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: airline-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - airline-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  flight-service:
+    build:
+      context: ./FLIGHTSANDSEARCH
+      dockerfile: Dockerfile
+    container_name: airline-flight-service
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-airline_dev_pass_2026}
+      DB_NAME: flight_search_db_dev
+    ports:
+      - "3000:3000"
+    networks:
+      - airline-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/v1/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  auth-service:
+    build:
+      context: ./AuthService
+      dockerfile: Dockerfile
+    container_name: airline-auth-service
+    restart: unless-stopped
+    environment:
+      PORT: 3001
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-airline_dev_pass_2026}
+      DB_NAME: auth_db_dev
+      JWT_KEY: ${JWT_KEY:-super_secret_airline_jwt_key_2026}
+      DB_SYNC: "false"
+      EMAIL_USER: ${EMAIL_USER:-YOUR_EMAIL_ADDRESS}
+      EMAIL_PASS: ${EMAIL_PASS:-}
+    ports:
+      - "3001:3001"
+    networks:
+      - airline-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/v1/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  booking-service:
+    build:
+      context: ./BookingService
+      dockerfile: Dockerfile
+    container_name: airline-booking-service
+    restart: unless-stopped
+    environment:
+      PORT: 3002
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-airline_dev_pass_2026}
+      DB_NAME: booking_db_dev
+      JWT_KEY: ${JWT_KEY:-super_secret_airline_jwt_key_2026}
+      FLIGHT_SERVICE_PATH: http://flight-service:3000/api/v1/flight
+      MESSAGE_BROKER_URL: amqp://rabbitmq:5672
+      EXCHANGE_NAME: BOOKING_SERVICE
+    ports:
+      - "3002:3002"
+    networks:
+      - airline-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      flight-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3002/api/v1/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  reminder-service:
+    build:
+      context: ./ReminderService
+      dockerfile: Dockerfile
+    container_name: airline-reminder-service
+    restart: unless-stopped
+    environment:
+      PORT: 3003
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: ${DB_PASSWORD:-airline_dev_pass_2026}
+      DB_NAME: reminder_db_dev
+      MESSAGE_BROKER_URL: amqp://rabbitmq:5672
+      EXCHANGE_NAME: BOOKING_SERVICE
+    ports:
+      - "3003:3003"
+    networks:
+      - airline-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3003/api/v1/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api-gateway:
+    build:
+      context: ./API_Gateway
+      dockerfile: Dockerfile
+    container_name: airline-api-gateway
+    restart: unless-stopped
+    environment:
+      PORT: 3004
+      NODE_ENV: development
+      JWT_KEY: ${JWT_KEY:-super_secret_airline_jwt_key_2026}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      BOOKING_SERVICE_URL: http://booking-service:3002
+      FLIGHT_SERVICE_URL: http://flight-service:3000
+    ports:
+      - "3004:3004"
+    networks:
+      - airline-network
+    depends_on:
+      flight-service:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+      booking-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3004/api/v1/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  mysql_data:
+  rabbitmq_data:
+
+networks:
+  airline-network:
+    driver: bridge

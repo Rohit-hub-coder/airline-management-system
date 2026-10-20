@@ -1,0 +1,30 @@
+version: '3.9'
+services:
+  booking-service:
+    build: .
+    ports:
+      - '3002:3002'
+    environment:
+      PORT: 3002
+      DB_HOST: mysql
+      DB_USERNAME: root
+      DB_PASSWORD: rootpassword
+      DB_NAME: booking_service
+      JWT_KEY: booking_service_jwt_secret
+      FLIGHT_SERVICE_PATH: http://flight-service:3001/api/v1/flights
+    depends_on:
+      - mysql
+      - flight-service
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword
+      MYSQL_DATABASE: booking_service
+    ports:
+      - '3306:3306'
+
+  flight-service:
+    image: nginx:alpine
+    ports:
+      - '3001:80'
