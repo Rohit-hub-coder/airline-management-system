@@ -1,378 +1,276 @@
-# ✈️ Airline Reservation & Management System (Microservices)
+# Airline Management System
 
-**A production-style distributed booking platform — built to solve the same consistency, coupling, and reliability problems real airline and e-commerce backends face at scale.**
+> Production-grade distributed airline booking and flight operations platform engineered with a microservices architecture, fail-closed concurrency control, asynchronous event-driven notifications via RabbitMQ, and centralized API Gateway orchestration.
 
-[![Node.js](https://img.shields.io/badge/Node.js-Express.js%205-339933)](https://expressjs.com/)
-[![Database](https://img.shields.io/badge/Database-MySQL%208-4479A1)](https://www.mysql.com/)
-[![Messaging](https://img.shields.io/badge/Messaging-RabbitMQ-FF6600)](https://www.rabbitmq.com/)
-[![ORM](https://img.shields.io/badge/ORM-Sequelize-52B0E7)](https://sequelize.org/)
-[![Docker](https://img.shields.io/badge/Containerization-Docker%20Compose-2496ED)](https://www.docker.com/)
-[![License](https://img.shields.io/badge/License-MIT-blue)](#license)
-
----
-
-### Highlights
-
-- **5 independently deployable microservices** communicating over REST and an async AMQP message broker, each owning its own MySQL schema (database-per-service).
-- **Single-command Docker Compose orchestration** running 7 containers (MySQL 8, RabbitMQ with Management UI, and 5 Node.js services) on an isolated bridge network with automated health checks.
-- **Fail-closed seat reservation** — closes a real overbooking race condition present in naive check-then-decrement designs via atomic decrement and capacity validation.
-- **Transactional outbox pattern** — database transaction atomically writes booking state and outbox events; a background poller ensures events are never lost during broker outages.
-- **Circuit breaker + local JWT verification** at the API Gateway — no cascading downstream failures, no auth service in the latency hot path.
-- **Correlation-ID tracing (`X-Request-Id`)** across every service boundary, without requiring an external distributed tracing stack.
-- **Ownership-scoped authorization** enforced on every booking read and cancellation via verified JWT claims.
-- **Comprehensive test suites** — Jest unit tests, automated end-to-end integration test runner, and concurrent booking race-condition verification.
+[![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Express.js](https://img.shields.io/badge/Express.js-4.x-000000?logo=express&logoColor=white)](https://expressjs.com/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![Sequelize](https://img.shields.io/badge/Sequelize-ORM-52B0E7?logo=sequelize&logoColor=white)](https://sequelize.org/)
+[![RabbitMQ](https://img.shields.io/badge/RabbitMQ-AMQP-FF6600?logo=rabbitmq&logoColor=white)](https://www.rabbitmq.com/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Jest](https://img.shields.io/badge/Tested%20with-Jest-C21325?logo=jest&logoColor=white)](https://jestjs.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Microservices](#microservices)
-- [System Diagrams](#system-diagrams)
-  - [End-to-End Booking Sequence](#end-to-end-booking-sequence-fail-closed-reservation--outbox-pattern)
-  - [Domain Model Class Diagram](#domain-model-class-diagram)
-- [Design Patterns & Principles](#design-patterns--principles)
-- [Key Engineering Decisions](#key-engineering-decisions)
+- [Problem & Motivation](#problem--motivation)
+- [System Architecture](#system-architecture)
+- [Microservices Overview](#microservices-overview)
+- [Core Workflows](#core-workflows)
+  - [Concurrency-Safe Booking Flow](#concurrency-safe-booking-flow)
+  - [Transactional Outbox Pattern](#transactional-outbox-pattern)
 - [Tech Stack](#tech-stack)
-- [API Overview](#api-overview)
-- [Quick Start with Docker Compose](#quick-start-with-docker-compose-recommended)
-- [Running Standalone on Host](#running-standalone-on-host-alternative)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Environment Setup](#environment-setup)
+  - [Running with Docker Compose (Recommended)](#running-with-docker-compose-recommended)
+  - [Running Standalone on Host](#running-standalone-on-host)
+- [Environment Variables](#environment-variables)
+- [API Endpoints](#api-endpoints)
 - [Testing & Verification](#testing--verification)
-- [Interview & Architectural Deep-Dive Guide](#interview--architectural-deep-dive-guide)
+- [Screenshots & Visuals](#screenshots--visuals)
+- [Roadmap](#roadmap)
+- [Author](#author)
 - [License](#license)
 
 ---
 
-## Overview
+## Problem & Motivation
 
-This repository contains the complete microservices application stack, multi-container Docker Compose orchestration, automated migrations and seeders, end-to-end and concurrency test suites, and comprehensive interview documentation. Each microservice is also maintained in its own dedicated repository for independent versioning and CI/CD.
+Real-world reservation systems face distinct distributed systems challenges:
+1. **Concurrency & Race Conditions**: High-volume booking surges (flash sales, seat allocation) can cause naive read-then-write systems to oversell inventory.
+2. **Coupling & Reliability**: Directly coupling booking completion to external notification pipelines (email, SMS) introduces latency and risks booking failures if external dispatchers fail.
+3. **Cascading Failures**: A bottleneck in flight lookups or user authentication shouldn't cascade into an unrecoverable system outage.
+4. **Distributed Request Tracing**: Debugging issues across isolated services and independent databases requires unified request correlation.
 
-The system is deliberately scoped around the hardest problems a real booking platform has to solve: preventing overbooking under concurrent writes, guaranteeing a confirmed booking is never silently lost even if the message broker goes down, and keeping a single request traceable across five independently-deployed services without a shared database or a monolithic call stack.
+This system addresses these challenges with **database-per-service isolation**, an **API Gateway with rate limiting and circuit breaking**, **atomic fail-closed inventory decrements**, and **asynchronous message queues with an outbox poller**.
 
 ---
 
-## Architecture
+## System Architecture
 
 ```mermaid
 graph TD
-    Client[Client / Postman / Browser]
-    GW["API Gateway :3004<br/>JWT verify · rate limit · circuit breaker"]
-    Auth["Auth Service :3001"]
-    Booking["Booking Service :3002"]
-    Flights["Flights & Search Service :3000"]
-    Reminder["Reminder Service :3003"]
-    AuthDB[(MySQL — Auth DB)]
-    BookingDB[(MySQL — Booking DB)]
-    ReminderDB[(MySQL — Reminder DB)]
-    FlightDB[(MySQL — Flights DB)]
-    MQ{{RabbitMQ<br/>BOOKING_SERVICE exchange}}
+    Client["Client (Browser / Postman / CLI)"]
+    GW["API Gateway (:3004)<br/>JWT Verification | Rate Limiting | Circuit Breaker"]
+    
+    Auth["Auth Service (:3001)<br/>User Credentials, Roles, OTP"]
+    Flights["Flights & Search Service (:3000)<br/>Airplanes, Airports, Cities, Flights"]
+    Booking["Booking Service (:3002)<br/>Seat Reservation, Outbox Engine"]
+    Reminder["Reminder Service (:3003)<br/>AMQP Consumer, Notification Poller"]
 
-    Client --> GW
-    GW --> Auth
-    GW --> Booking
-    GW --> Flights
-    Auth --> AuthDB
-    Flights --> FlightDB
-    Booking --> BookingDB
-    Booking -->|outbox poller| MQ
-    Booking -.->|seat availability & atomic decrement| Flights
-    MQ --> Reminder
-    Reminder --> ReminderDB
-    Reminder -->|email notifications| Ethereal[Ethereal / Nodemailer Sandbox]
+    AuthDB[("MySQL: auth_db_dev")]
+    FlightDB[("MySQL: flight_search_db_dev")]
+    BookingDB[("MySQL: booking_db_dev")]
+    ReminderDB[("MySQL: reminder_db_dev")]
+
+    RabbitMQ{{"RabbitMQ Broker<br/>BOOKING_SERVICE Exchange"}}
+    SMTP["Email Service (Nodemailer)"]
+
+    Client -->|HTTP REST| GW
+    GW -->|/api/v1/auth, /signup, /signin| Auth
+    GW -->|/api/v1/flights, /airports| Flights
+    GW -->|/api/v1/bookings| Booking
+
+    Auth <-->|Sequelize ORM| AuthDB
+    Flights <-->|Sequelize ORM| FlightDB
+    Booking <-->|Sequelize ORM| BookingDB
+    Reminder <-->|Sequelize ORM| ReminderDB
+
+    Booking -.->|Inter-Service HTTP: Check & Atomic Seat Decrement| Flights
+    Booking -->|Outbox Poller: Publish Confirmed Booking| RabbitMQ
+    RabbitMQ -->|AMQP Consumer| Reminder
+    Reminder -->|Dispatch Email| SMTP
 ```
 
 ---
 
-## Microservices
+## Microservices Overview
 
-| Service | Description | Container Port | Host Port | Repository |
-|---|---|---|---|---|
-| 🛡️ **API Gateway** | Single entry point for all client traffic. Local JWT verification, rate limiting, request proxying, circuit breaking (`opossum`), correlation-ID tracing. | `3004` | `3004` | [API_GATEWAY](https://github.com/Rohit-hub-coder/API_GATEWAY) |
-| 🔐 **Auth Service** | User signup/signin, OTP email verification, JWT issuance with roles, bcrypt password hashing. | `3001` | `3001` | [auth-service](https://github.com/Rohit-hub-coder/auth-service) |
-| 🎫 **Booking Service** | Booking creation, cancellation, status tracking, transactional outbox event publisher, and concurrency-safe seat reservation. | `3002` | `3002` | [booking-service](https://github.com/Rohit-hub-coder/booking-service) |
-| ✈️ **Flights & Search** | Flight, airport, airplane, and city management with relational search and atomic seat inventory updates. | `3000` | `3000` | [FLIGHTSANDSEARCHSERVICE](https://github.com/Rohit-hub-coder/FLIGHTSANDSEARCHSERVICE) |
-| 📢 **Reminder Service** | Asynchronous booking-confirmation notifications, driven by RabbitMQ with idempotent consumer and poller. | `3003` | `3003` | [ReminderService](https://github.com/Rohit-hub-coder/ReminderService) |
+| Service | Port (Container / Host) | Database | Primary Responsibility |
+|---|:---:|---|---|
+| **API Gateway** | `3004:3004` | None | Reverse proxy entry point, token verification, rate limiting (`express-rate-limit`), circuit breaking (`opossum`), correlation tracking (`X-Request-Id`). |
+| **Auth Service** | `3001:3001` | `auth_db_dev` | User registration, password hashing (`bcrypt`), JWT generation/verification, role-based authorization, OTP generation and lifecycle cleanup. |
+| **Flights & Search** | `3000:3000` | `flight_search_db_dev` | Flight schedule catalog, airport and airplane inventory, multi-criteria flight queries, and atomic seat availability decrement/restoration. |
+| **Booking Service** | `3002:3002` | `booking_db_dev` | Transactional booking state management, seat reservation coordination, cancellation refunds, and transactional outbox persistence. |
+| **Reminder Service** | `3003:3003` | `reminder_db_dev` | Asynchronous RabbitMQ consumer (`amqplib`), periodic background notification cron runner (`node-cron`), and email dispatching via Nodemailer. |
 
 ---
 
-## System Diagrams
+## Core Workflows
 
-### End-to-End Booking Sequence (Fail-Closed Reservation + Outbox Pattern)
+### Concurrency-Safe Booking Flow
 
-This is the system's core transaction, demonstrating how a synchronous, consistency-critical path (seat reservation) is composed with an asynchronous, at-least-once delivery path (notification), bridged by the transactional outbox pattern so a broker outage can never silently drop a confirmed booking.
+To prevent race conditions where concurrent requests oversell remaining flight seats:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as Client
-    participant GW as API Gateway (:3004)
-    participant B as Booking Service (:3002)
-    participant F as Flights Service (:3000)
-    participant DB as Booking DB (MySQL)
-    participant MQ as RabbitMQ (:5672)
-    participant R as Reminder Service (:3003)
+    actor User
+    participant GW as API Gateway
+    participant Booking as Booking Service
+    participant Flights as Flight Service
+    participant DB as Booking Database
+    participant MQ as RabbitMQ
+    participant Reminder as Reminder Service
 
-    C->>GW: POST /api/v1/bookings (JWT, flightId, noOfSeats)
-    GW->>GW: Verify JWT locally using shared secret (no network hop to Auth)
-    GW->>B: Proxy request with X-Request-Id + authenticated userId
-    B->>F: GET /api/v1/flight/:id (check seat availability)
-    alt Seat count unavailable or insufficient
-        F-->>B: Error / Insufficient seats
-        B-->>GW: 503 Service Unavailable / 400 Insufficient seats (fail-closed)
-        GW-->>C: 503 / 400 Response
-    else Sufficient seats confirmed
-        F-->>B: Available seat count confirmed
-        B->>DB: BEGIN TRANSACTION
-        B->>DB: INSERT into Bookings (status = InProcess)
-        B->>DB: INSERT into Outbox (event = booking.created, published = false)
-        B->>DB: COMMIT
-        B->>F: PATCH /api/v1/flight/:id (atomic seat decrement)
-        B->>DB: UPDATE Bookings SET status = Booked
-        B-->>GW: 201 Booking confirmed
-        GW-->>C: 201 Booking confirmed
-
-        loop Outbox Poller (background, decoupled from HTTP request path)
-            B->>DB: SELECT unpublished events FROM Outbox FOR UPDATE
-            B->>MQ: Publish booking.created to exchange
-            B->>DB: UPDATE Outbox SET published = true
+    User->>GW: POST /api/v1/bookings (flightId, noOfSeats, JWT)
+    GW->>GW: Verify JWT & inject X-Request-Id
+    GW->>Booking: Forward booking request
+    Booking->>Flights: GET /api/v1/flight/:id (Check capacity)
+    Flights-->>Booking: Return flight metadata (totalSeats)
+    
+    rect rgb(240, 248, 255)
+        Note over Booking,DB: Atomic Transaction
+        Booking->>DB: Calculate cost & create booking (Status: InProcess)
+        Booking->>Flights: PATCH /api/v1/flight/:id (Atomic seat decrement)
+        alt Sufficient Seats
+            Flights-->>Booking: Decrement confirmed
+            Booking->>DB: Update booking to Booked & write Outbox record
+        else Insufficient Capacity / Sold Out
+            Flights-->>Booking: 400 Bad Request
+            Booking->>DB: Rollback / Mark Cancelled
+            Booking-->>GW: 400 Overbooking prevented
         end
-
-        MQ->>R: Consume booking.created (at-least-once)
-        R->>R: Idempotency check (prevent duplicate notifications)
-        R->>R: Send confirmation email (Nodemailer / Ethereal)
     end
+
+    Booking->>MQ: Publish booking.created event via outbox poller
+    MQ->>Reminder: Consume event
+    Reminder->>User: Dispatch confirmation email via SMTP
+    Booking-->>User: Return 201 Confirmed Booking Details
 ```
 
-### Domain Model Class Diagram
+### Transactional Outbox Pattern
 
-Each service manages its own isolated MySQL database schema (database-per-service pattern). Relationships spanning services use logical identifiers (`userId`, `flightId`) rather than database-enforced foreign keys.
-
-```mermaid
-classDiagram
-    namespace AuthService {
-        class User {
-            +int id
-            +string email
-            +string password
-            +string otp
-            +Date otpExpiresAt
-            +boolean isVerified
-            +Date createdAt
-        }
-        class Role {
-            +int id
-            +string name
-        }
-        class UserRole {
-            +int userId
-            +int roleId
-        }
-    }
-
-    namespace FlightsService {
-        class City {
-            +int id
-            +string name
-        }
-        class Airport {
-            +int id
-            +string name
-            +string address
-            +int cityId
-        }
-        class Airplane {
-            +int id
-            +string modelNumber
-            +int capacity
-        }
-        class Flight {
-            +int id
-            +string flightNumber
-            +int airplaneId
-            +int departureAirportId
-            +int arrivalAirportId
-            +Date departureTime
-            +Date arrivalTime
-            +int price
-            +int totalSeats
-        }
-    }
-
-    namespace BookingService {
-        class Booking {
-            +int id
-            +int flightId
-            +int userId
-            +string status
-            +int noOfSeats
-            +int totalCost
-            +Date createdAt
-        }
-        class Outbox {
-            +int id
-            +string eventType
-            +json payload
-            +boolean published
-            +Date createdAt
-        }
-    }
-
-    namespace ReminderService {
-        class NotificationTicket {
-            +int id
-            +string subject
-            +string content
-            +string recepientEmail
-            +string status
-            +Date notificationTime
-        }
-    }
-
-    User "1" --> "*" UserRole
-    Role "1" --> "*" UserRole
-    City "1" --> "*" Airport
-    Airplane "1" --> "*" Flight
-    Airport "1" --> "*" Flight : departure / arrival
-    Booking "1" --> "1" Outbox : emits within transaction
-    Booking ..> User : userId (logical reference)
-    Booking ..> Flight : flightId (logical reference)
-    NotificationTicket ..> Booking : bookingId (payload reference)
-```
-
----
-
-## Design Patterns & Principles
-
-| Pattern / Principle | Implementation & Location |
-|---|---|
-| **API Gateway** | Single public entry point (`:3004`), offloading token validation, rate limiting, and request routing from downstream services. |
-| **Database-per-Service** | Each service owns an isolated MySQL schema (`auth_db_dev`, `flight_search_db_dev`, `booking_db_dev`, `reminder_db_dev`); zero cross-database queries or JOINs. |
-| **Transactional Outbox** | In `BookingService`, booking creation and outbox entry are saved inside a single `sequelize.transaction()` block, preventing partial write states. |
-| **Circuit Breaker** | API Gateway proxies to Flights via `opossum`, failing fast when error rate exceeds threshold to stop cascading latency. |
-| **Fail-Closed Seat Reservation** | `BookingService` refuses to reserve seats if downstream seat availability cannot be explicitly verified. |
-| **Event-Driven Asynchrony** | `ReminderService` reacts to `booking.created` events delivered via RabbitMQ exchange, completely decoupled from the synchronous HTTP booking flow. |
-| **Role-Based Access Control** | `AuthService` issues signed JWTs with role claims (`Customer`, `admin`, `Airline_Business`), verified downstream. |
-| **Distributed Tracing** | `X-Request-Id` header is assigned at API Gateway and forwarded across all intermediate service requests and logs. |
-
----
-
-## Key Engineering Decisions
-
-| Decision | Problem Solved | Trade-off Accepted |
-|---|---|---|
-| **Fail-closed seat reservation** | Prevents overbooking race conditions during concurrent booking requests. | A transient downstream network timeout rejects the booking rather than risking overselling inventory. |
-| **Transactional outbox pattern** | Guarantees that a confirmed booking and its message broker notification event are never inconsistent. | Requires background polling loop and at-least-once delivery; consumer must be idempotent. |
-| **Local JWT verification at Gateway** | Eliminates an extra network hop to Auth Service on every single authenticated request. | Immediate token revocation requires token blacklisting; otherwise valid until expiry. |
-| **Isolated Docker Bridge Network** | Services communicate using Docker DNS (`auth-service`, `booking-service`, `mysql`, `rabbitmq`) without host port collisions. | Requires Docker environment configuration; host port `3307` used for MySQL to avoid host `3306` conflicts. |
-| **Ownership-scoped access** | Prevents unauthorized users from reading or cancelling another user's booking via JWT user verification. | Rejects cross-user requests with `403 Forbidden`. |
+Rather than dual-writing directly to both MySQL and RabbitMQ (which risks inconsistency if the broker is unreachable), the Booking Service persists events into the transactional database schema. A resilient background poller scans for pending records, dispatches them to RabbitMQ, and marks them dispatched once acknowledged.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| **Runtime & Framework** | Node.js (v20+ / v24), Express.js |
-| **Databases & ORM** | MySQL 8.0, Sequelize ORM + Sequelize CLI migrations and seeders |
-| **Message Broker** | RabbitMQ 3.13 (`amqplib`), AMQP exchange with transactional outbox publisher |
-| **Authentication & Security** | JWT (`jsonwebtoken`), `bcrypt` password hashing, OTP generation |
-| **Gateway & Resilience** | `http-proxy-middleware`, `express-rate-limit`, `opossum` circuit breaker, `helmet`, `cors` |
-| **Email Transport** | Nodemailer with Ethereal disposable test sandbox |
-| **Orchestration & DevOps** | Docker Compose (`compose.yaml`), isolated bridge networking, health checks |
-| **Testing** | Jest, Supertest, custom asynchronous concurrency and E2E runners |
+| Layer | Technology | Usage in Project |
+|---|---|---|
+| **Runtime** | Node.js (v18+) | Core JavaScript runtime across all services |
+| **Web Framework** | Express.js 4.x | REST API routing and middleware pipelines |
+| **Database** | MySQL 8.0 | Relational database (schema-per-service pattern) |
+| **ORM** | Sequelize & Sequelize CLI | Models, relational associations, database migrations, and seeders |
+| **Message Broker** | RabbitMQ (AMQP) | Asynchronous messaging between Booking and Reminder services |
+| **API Gateway Patterns** | `http-proxy-middleware`, `opossum`, `express-rate-limit` | Routing, circuit breaking, and DDoS throttling |
+| **Security & Auth** | `jsonwebtoken`, `bcrypt` | Stateless bearer token authentication, secure password hashing |
+| **Notifications** | `nodemailer`, `node-cron` | Asynchronous email generation and scheduled reminder polling |
+| **Containerization** | Docker, Docker Compose | Multi-container composition, health checking, bridge networking |
+| **Testing** | Jest, Supertest | Unit test suites, mock verification, and integration validation |
 
 ---
 
-## API Overview
+## Project Structure
 
-All client traffic routes through the API Gateway at `http://localhost:3004`.
-
-| Method | Endpoint | Auth Required | Description |
-|---|---|:---:|---|
-| `POST` | `/api/v1/signup` | No | Register a new user account |
-| `POST` | `/api/v1/signin` | No | Authenticate credentials and receive signed JWT |
-| `POST` | `/api/v1/verify-otp` | No | Verify user signup via OTP |
-| `GET` | `/api/v1/flight` | No | Search and filter flights with departure, arrival, and price |
-| `GET` | `/api/v1/flight/:id` | No | Retrieve detailed information for a specific flight |
-| `POST` | `/api/v1/bookings` | **Yes (JWT)** | Reserve seats and create a confirmed booking |
-| `GET` | `/api/v1/bookings` | **Yes (JWT)** | List all bookings belonging to authenticated user |
-| `GET` | `/api/v1/bookings/:id` | **Yes (JWT)** | Get booking details (owner only) |
-| `PATCH` | `/api/v1/bookings/:id/cancel` | **Yes (JWT)** | Cancel booking and release reserved seats (owner only) |
-| `GET` | `/api/v1/health` | No | API Gateway liveness check |
-| `GET` | `/api/v1/health/aggregate` | No | Downstream aggregate health check across all services |
+```text
+airline-management-system/
+├── API_Gateway/               # API Gateway service (port 3004)
+│   ├── src/                   # Proxy logic, rate limiters, auth middleware
+│   ├── Dockerfile
+│   └── package.json
+├── AuthService/               # Authentication & User Management (port 3001)
+│   ├── src/                   # Controllers, models, migrations, seeders
+│   ├── Dockerfile
+│   └── package.json
+├── BookingService/            # Flight Booking & Outbox Engine (port 3002)
+│   ├── src/                   # Booking services, repositories, AMQP publisher
+│   ├── tests/                 # Jest test suites
+│   ├── Dockerfile
+│   └── package.json
+├── FLIGHTSANDSEARCH/          # Flights, Airports, Cities catalog (port 3000)
+│   ├── src/                   # Flight CRUD, capacity validation, filters
+│   ├── Dockerfile
+│   └── package.json
+├── ReminderService/           # Asynchronous Notification Service (port 3003)
+│   ├── src/                   # AMQP consumer, cron poller, email sender
+│   ├── Dockerfile
+│   └── package.json
+├── docker/                    # Docker initialization scripts
+│   └── mysql/init.sql         # Automated database provisioning script
+├── scripts/                   # Verification and testing automation
+│   ├── migrate-and-seed.ps1   # PowerShell migration and seeder script
+│   ├── test-concurrency.js    # Concurrency and race-condition simulator
+│   └── test-e2e.js            # End-to-end integration test runner
+├── .env.example               # Root environment variables template
+├── compose.yaml               # Docker Compose orchestration manifest
+└── LICENSE                    # MIT License
+```
 
 ---
 
-## Quick Start with Docker Compose (Recommended)
+## Getting Started
 
-### 1. Prerequisites
+### Prerequisites
+
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running.
-- Node.js v20+ (if running host-side verification scripts).
+- [Node.js (v18+)](https://nodejs.org/) installed (for running host-side verification scripts).
+- Git installed.
 
-### 2. Configure Environment
-Clone the repository and create the root `.env` file from the example:
-```bash
-git clone https://github.com/Rohit-hub-coder/airline-reservation-system.git
-cd airline-reservation-system
+### Environment Setup
 
-# Copy the environment file
-cp .env.docker.example .env
-```
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Rohit-hub-coder/airline-management-system.git
+   cd airline-management-system
+   ```
 
-### 3. Start Application Stack
-Build images and start all 7 containers in detached mode:
-```bash
-docker compose up -d --build
-```
+2. Create the root `.env` configuration file from the template:
+   ```powershell
+   # Windows PowerShell
+   Copy-Item .env.example .env
 
-Verify that all containers report `Up (healthy)`:
-```bash
-docker compose ps
-```
-
-### 4. Run Database Migrations & Seeders
-Execute the database setup script to migrate schemas and seed initial data across all services:
-
-```powershell
-# On Windows (PowerShell)
-.\scripts\migrate-and-seed.ps1
-```
-
-```bash
-# On Linux / macOS
-docker compose exec -T auth-service npx sequelize-cli db:migrate
-docker compose exec -T auth-service npx sequelize-cli db:seed:all
-docker compose exec -T flight-service npx sequelize-cli db:migrate
-docker compose exec -T flight-service npx sequelize-cli db:seed:all
-docker compose exec -T flight-service node src/seeders/manual_flights_seeder.js
-docker compose exec -T booking-service npx sequelize-cli db:migrate
-docker compose exec -T reminder-service npx sequelize-cli db:migrate
-```
-
-### 5. Verify Health
-Check aggregate downstream health through the API Gateway:
-```bash
-curl http://localhost:3004/api/v1/health/aggregate
-```
-
-Access the RabbitMQ Management Dashboard:
-- URL: [http://localhost:15672](http://localhost:15672)
-- Username: `guest`
-- Password: `guest`
+   # Linux / macOS
+   cp .env.example .env
+   ```
 
 ---
 
-## Running Standalone on Host (Alternative)
+### Running with Docker Compose (Recommended)
 
-To run the services without Docker containers on your local host:
-
-1. Ensure MySQL 8 is running locally with databases: `auth_db_dev`, `flight_search_db_dev`, `booking_db_dev`, `reminder_db_dev`.
-2. Start RabbitMQ via local broker or standalone container:
+1. Build and boot all 7 containers (MySQL, RabbitMQ, and 5 Microservices):
    ```bash
-   docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.13-management
+   docker compose up -d --build
    ```
-3. In each service directory (`API_Gateway`, `AuthService`, `BookingService`, `FLIGHTSANDSEARCH`, `ReminderService`):
+
+2. Verify that all containers report healthy:
+   ```bash
+   docker compose ps
+   ```
+
+3. Run automated database migrations and seeders across all services:
+   ```powershell
+   # Windows (PowerShell)
+   .\scripts\migrate-and-seed.ps1
+   ```
+   *(Or on Linux/macOS, execute migrations through `docker compose exec` for each service).*
+
+4. Verify aggregate system health:
+   ```bash
+   curl http://localhost:3004/api/v1/health/aggregate
+   ```
+
+5. Access the RabbitMQ Management UI:
+   - URL: `http://localhost:15672`
+   - Default User: `guest`
+   - Default Password: `guest`
+
+---
+
+### Running Standalone on Host
+
+1. Ensure MySQL 8 is running locally with four created databases:
+   - `auth_db_dev`
+   - `flight_search_db_dev`
+   - `booking_db_dev`
+   - `reminder_db_dev`
+2. Start RabbitMQ locally (or run via standalone container: `docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3.13-management`).
+3. For each service directory (`API_Gateway`, `AuthService`, `BookingService`, `FLIGHTSANDSEARCH`, `ReminderService`):
    ```bash
    npm install
    npm start
@@ -380,36 +278,98 @@ To run the services without Docker containers on your local host:
 
 ---
 
+## Environment Variables
+
+The system uses standard environment configurations. Configurable keys from `.env.example`:
+
+| Variable Name | Default / Example | Purpose |
+|---|---|---|
+| `DB_PASSWORD` | `your_mysql_secure_password` | MySQL root password shared across databases |
+| `HOST_MYSQL_PORT` | `3307` | Host port mapped to the MySQL container |
+| `RABBITMQ_USER` | `guest` | Username for RabbitMQ broker |
+| `RABBITMQ_PASS` | `guest` | Password for RabbitMQ broker |
+| `JWT_KEY` | `your_shared_random_jwt_secret` | Secret key used to sign and verify JWT tokens |
+| `EMAIL_USER` | `your_email@gmail.com` | Nodemailer sender email address |
+| `EMAIL_PASS` | `your_gmail_app_password` | Nodemailer SMTP / Google App password |
+
+---
+
+## API Endpoints
+
+All external requests route through the centralized API Gateway at `http://localhost:3004`.
+
+| Service | Method | Route | Auth Required | Description |
+|---|---|---|:---:|---|
+| **Gateway** | `GET` | `/api/v1/health` | No | Gateway liveness health check |
+| **Gateway** | `GET` | `/api/v1/health/aggregate` | No | Aggregate status check across all downstream services |
+| **Auth** | `POST` | `/api/v1/signup` | No | Register a new customer user account |
+| **Auth** | `POST` | `/api/v1/signin` | No | Authenticate user and obtain signed JWT |
+| **Auth** | `POST` | `/api/v1/verify-otp` | No | Verify user registration with one-time passcode |
+| **Flights** | `GET` | `/api/v1/flight` | No | Search flights with filters (departure, arrival, price) |
+| **Flights** | `GET` | `/api/v1/flight/:id` | No | Retrieve detailed flight metadata and capacity |
+| **Flights** | `POST` | `/api/v1/flight` | Yes (Admin) | Create a new flight entry |
+| **Flights** | `GET` | `/api/v1/airport` | No | List airports |
+| **Flights** | `GET` | `/api/v1/city` | No | List cities |
+| **Booking** | `POST` | `/api/v1/bookings` | **Yes (JWT)** | Concurrency-safe seat reservation and booking creation |
+| **Booking** | `GET` | `/api/v1/bookings` | **Yes (JWT)** | Fetch all bookings for the authenticated user |
+| **Booking** | `GET` | `/api/v1/bookings/:id` | **Yes (JWT)** | Retrieve specific booking details (ownership verified) |
+| **Booking** | `PATCH` | `/api/v1/bookings/:id/cancel` | **Yes (JWT)** | Cancel reservation and restore flight seat capacity |
+
+---
+
 ## Testing & Verification
 
-### 1. End-to-End Acceptance Suite
-Verifies health checks, flight catalog querying, user registration, OTP verification, authentication, booking creation, seat decrement verification, booking cancellation, seat restore, and unauthorized access guards:
+### 1. Booking Service Unit & Integration Tests (Jest)
+Runs unit test suites covering transactional boundaries, validation, and seat state transitions:
 ```bash
-node scripts/test-e2e.js
+# Inside BookingService folder or via Docker:
+docker compose exec booking-service npm test
 ```
 
-### 2. Concurrency Race-Condition Test
-Simulates concurrent booking attempts targeting the same flight simultaneously to ensure the fail-closed seat decrement logic prevents overbooking:
+### 2. Concurrency Race-Condition Verification
+Simulates concurrent, simultaneous booking requests attempting to book the same flight to verify that the atomic fail-closed reservation mechanism prevents overbooking:
 ```bash
 node scripts/test-concurrency.js
 ```
 
-### 3. Unit Tests (Booking Service)
-Executes Jest test suites covering transaction boundaries, payment rollbacks, and seat availability validations:
+### 3. End-to-End System Acceptance Flow
+Executes full user flow: signup → signin → flight search → seat reservation → booking confirmation → cancellation:
 ```bash
-docker compose exec booking-service npm test
+node scripts/test-e2e.js
 ```
 
 ---
 
-## Interview & Architectural Deep-Dive Guide
+## Screenshots & Visuals
 
-For a comprehensive guide covering technical interview talking points, distributed transaction trade-offs, circuit breaker configurations, and outbox failure recovery modes, see:
+*Place visual assets under `docs/` to demonstrate live system operation:*
 
-📖 **[Full Technical Interview Guide (INTERVIEW_GUIDE.md)](INTERVIEW_GUIDE.md)**
+- `docs/architecture-overview.png`: Microservices topology and network diagram.
+- `docs/rabbitmq-dashboard.png`: Active exchanges and message queues in RabbitMQ Management UI.
+- `docs/concurrency-test-output.png`: Terminal output demonstrating overbooking rejection during concurrent load.
+- `docs/e2e-test-results.png`: End-to-end acceptance script pass logs.
+
+---
+
+## Roadmap
+
+- [ ] **Kubernetes Manifests**: Helm chart deployments for production cluster scaling.
+- [ ] **Observability**: OpenTelemetry instrumentation with Prometheus metrics and Grafana dashboards.
+- [ ] **Payment Gateway Webhook**: Integration with Stripe / Razorpay webhooks for asynchronous payment capture.
+- [ ] **Distributed Caching**: Redis caching layer for high-throughput flight search queries.
+
+---
+
+## Author
+
+**Rohit Kumar**  
+Software Engineering Undergrad @ Delhi Technological University (DTU)  
+- GitHub: [@Rohit-hub-coder](https://github.com/Rohit-hub-coder)  
+- LinkedIn: [Rohit Kumar](https://linkedin.com/in/rohit-kumar-dtu)  
+- Email: [dhimanrohit1003@gmail.com](mailto:dhimanrohit1003@gmail.com)
 
 ---
 
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+This project is licensed under the [MIT License](LICENSE).
