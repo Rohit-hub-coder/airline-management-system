@@ -21,3 +21,7 @@ yarn-error.log*
 # OS metadata
 .DS_Store
 Thumbs.db
+
+# Personal interview & preparation guides
+INTERVIEW_GUIDE.md
+*/INTERVIEW_GUIDE.md
