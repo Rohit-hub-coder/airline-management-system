@@ -178,6 +178,10 @@ services:
       AUTH_SERVICE_URL: http://auth-service:3001
       BOOKING_SERVICE_URL: http://booking-service:3002
       FLIGHT_SERVICE_URL: http://flight-service:3000
+      REMINDER_SERVICE_URL: http://reminder-service:3003
+      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASS: ${RABBITMQ_PASS:-guest}
     ports:
       - "3004:3004"
     networks:
@@ -188,6 +192,8 @@ services:
       auth-service:
         condition: service_healthy
       booking-service:
+        condition: service_healthy
+      reminder-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3004/api/v1/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
