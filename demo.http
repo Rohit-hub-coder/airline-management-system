@@ -1,0 +1,79 @@
+### ====================================================================
+### AIRLINE RESERVATION SYSTEM — LIVE INTERVIEW DEMO (REST CLIENT)
+### ====================================================================
+
+### 1. Gateway Aggregate Health Check
+GET http://localhost:3004/api/v1/health/aggregate
+
+### --------------------------------------------------------------------
+### 2. Search All Flights (Notice totalSeats on Flight ID 1)
+GET http://localhost:3004/api/v1/flights/flight
+
+### --------------------------------------------------------------------
+### 3. Inspect Flight UK-811 (ID: 1) Before Booking
+GET http://localhost:3004/api/v1/flights/flight/1
+
+### --------------------------------------------------------------------
+### 4. Register a New User Account (Generates OTP)
+# @name signup
+POST http://localhost:3004/api/v1/auth/signup
+Content-Type: application/json
+
+{
+  "name": "Live Interviewer",
+  "email": "candidate_demo@airline.com",
+  "password": "Password123!"
+}
+
+### --------------------------------------------------------------------
+### 5. Verify User Email with OTP
+### (The OTP is extracted automatically from the signup response above)
+POST http://localhost:3004/api/v1/auth/verify-otp
+Content-Type: application/json
+
+{
+  "email": "candidate_demo@airline.com",
+  "otp": "{{signup.response.body.data.otp}}"
+}
+
+### --------------------------------------------------------------------
+### 6. Sign In and Receive JWT Bearer Token
+# @name signin
+POST http://localhost:3004/api/v1/auth/signin
+Content-Type: application/json
+
+{
+  "email": "candidate_demo@airline.com",
+  "password": "Password123!"
+}
+
+### --------------------------------------------------------------------
+### 7. Create a Booking (2 Seats on Flight 1)
+### Notice: Bearer token is automatically injected from Step 6!
+# @name booking
+POST http://localhost:3004/api/v1/bookings
+Content-Type: application/json
+Authorization: Bearer {{signin.response.body.data}}
+
+{
+  "flightId": 1,
+  "noOfSeats": 2
+}
+
+### --------------------------------------------------------------------
+### 8. Inspect Flight UK-811 Again (Verify Seats Decremented by 2!)
+GET http://localhost:3004/api/v1/flights/flight/1
+
+### --------------------------------------------------------------------
+### 9. View Authenticated User's Bookings
+GET http://localhost:3004/api/v1/bookings
+Authorization: Bearer {{signin.response.body.data}}
+
+### --------------------------------------------------------------------
+### 10. Cancel Booking (Restores Seats back to original count)
+PATCH http://localhost:3004/api/v1/bookings/{{booking.response.body.data.id}}/cancel
+Authorization: Bearer {{signin.response.body.data}}
+
+### --------------------------------------------------------------------
+### 11. Inspect Flight UK-811 Final Time (Verify Seats Restored!)
+GET http://localhost:3004/api/v1/flights/flight/1
