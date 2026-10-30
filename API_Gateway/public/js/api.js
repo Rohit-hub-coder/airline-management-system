@@ -178,6 +178,10 @@ const API = (() => {
       return request(`/api/v1/bookings/${id}`);
     },
 
+    async getBookingOutbox(id) {
+      return request(`/api/v1/bookings/${id}/outbox`);
+    },
+
     async createBooking(flightId, noOfSeats) {
       return request('/api/v1/bookings', {
         method: 'POST',

@@ -17,7 +17,7 @@ const app = express();
 
 const readRateLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: 600,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
@@ -31,7 +31,7 @@ const readRateLimiter = rateLimit({
 
 const writeRateLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 5,
+  max: 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: {
