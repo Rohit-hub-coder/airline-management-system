@@ -12,9 +12,10 @@ async function startConsumer() {
       console.error('RabbitMQ connection error:', err && err.message);
     });
     connection.on('close', () => {
-      console.warn('RabbitMQ connection closed');
+      console.warn('RabbitMQ connection closed. Attempting reconnect in 5s...');
       connection = null;
       channel = null;
+      setTimeout(() => startConsumer(), 5000);
     });
 
     channel = await connection.createChannel();
@@ -52,11 +53,11 @@ async function startConsumer() {
         channel.ack(msg);
       } catch (error) {
         console.error('Failed to process reminder message', error);
-        // leave message unacked so it can be retried
       }
     }, { noAck: false });
   } catch (error) {
-    console.error('Failed to start RabbitMQ consumer', error);
+    console.error(`Failed to start RabbitMQ consumer: ${error.message}. Retrying in 5s...`);
+    setTimeout(() => startConsumer(), 5000);
   }
 }
 
