@@ -7,7 +7,8 @@ const createBooking = async (req, res) => {
     const response = await bookingService.createBooking({
       userId: req.user.id,
       flightId: req.body.flightId,
-      noOfSeats: req.body.noOfSeats
+      noOfSeats: req.body.noOfSeats,
+      failPaymentForTest: req.body.failPaymentForTest
     });
     return res.status(StatusCodes.CREATED).json({
       message: 'Booking created successfully',
@@ -90,6 +91,34 @@ const getBooking = async (req, res) => {
   }
 };
 
+const getBookingOutbox = async (req, res) => {
+  try {
+    const response = await bookingService.getBookingOutbox(req.user.id, req.params.id);
+    return res.status(StatusCodes.OK).json({
+      message: 'Booking outbox event fetched successfully',
+      data: response,
+      success: true,
+      err: {}
+    });
+  } catch (error) {
+    if (error.isOperational) {
+      return res.status(error.statusCode).json({
+        message: error.message,
+        explanation: error.explanation,
+        data: {},
+        success: false,
+        err: {}
+      });
+    }
+    return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      message: 'Internal Server Error',
+      data: {},
+      success: false,
+      err: {}
+    });
+  }
+};
+
 const cancelBooking = async (req, res) => {
   try {
     const response = await bookingService.cancelBooking(req.user.id, req.params.id);
@@ -122,5 +151,6 @@ module.exports = {
   createBooking,
   getBookings,
   getBooking,
+  getBookingOutbox,
   cancelBooking
 };

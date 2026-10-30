@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { StatusCodes } = require('http-status-codes');
+const { Op } = require('sequelize');
 const { AppError } = require('../utils/errors');
 const { FLIGHT_SERVICE_PATH } = require('../config/serverConfig');
 const BookingRepository = require('../repository/booking-repository');
@@ -18,13 +19,37 @@ class BookingService {
     };
 
     try {
-      const flightResponse = await axios.get(`${FLIGHT_SERVICE_PATH}/${bookingData.flightId}`);
-      const flightData = flightResponse.data?.data || flightResponse.data;
-      const normalizedFlightData = flightData && typeof flightData === 'object' ? flightData : null;
-
-      if (!normalizedFlightData) {
-        throw new AppError('Flight availability could not be verified', 'The flight service returned an unexpected payload', 'The flight service must return a flight object with explicit seat data to continue', StatusCodes.SERVICE_UNAVAILABLE);
+      let flightResponse;
+      try {
+        flightResponse = await axios.get(`${FLIGHT_SERVICE_PATH}/${bookingData.flightId}`);
+      } catch (flightErr) {
+        if (flightErr.response?.status === 404) {
+          throw new AppError(
+            'Flight not found',
+            `No flight exists with ID ${bookingData.flightId}`,
+            'Please verify the flight ID and try again',
+            StatusCodes.NOT_FOUND
+          );
+        }
+        throw new AppError(
+          'Flight service unavailable',
+          'Could not reach the flight service to verify flight availability',
+          flightErr.message || 'Flight service communication error',
+          StatusCodes.SERVICE_UNAVAILABLE
+        );
       }
+
+      const flightData = flightResponse.data?.data;
+      if (!flightData || typeof flightData !== 'object') {
+        throw new AppError(
+          'Flight not found',
+          `No flight exists with ID ${bookingData.flightId}`,
+          'Please verify the flight ID and try again',
+          StatusCodes.NOT_FOUND
+        );
+      }
+
+      const normalizedFlightData = flightData;
 
       const hasExplicitSeatCount = Object.prototype.hasOwnProperty.call(normalizedFlightData, 'totalSeats') || Object.prototype.hasOwnProperty.call(normalizedFlightData, 'availableSeats');
       const rawSeatCount = normalizedFlightData.totalSeats ?? normalizedFlightData.availableSeats;
@@ -40,18 +65,27 @@ class BookingService {
 
       booking.totalCost = Number(normalizedFlightData.price || 0) * Number(bookingData.noOfSeats);
 
+      let seatsDecremented = false;
       try {
         await axios.patch(`${FLIGHT_SERVICE_PATH}/${bookingData.flightId}`, {
           decrementSeats: Number(bookingData.noOfSeats),
           reserveIfAvailable: true,
           reason: 'booking-reservation'
         });
+        seatsDecremented = true;
 
         booking.status = 'Pending Payment';
-        const paymentResult = await this.paymentService.processPayment(booking.totalCost);
+        const paymentResult = await this.paymentService.processPayment(
+          booking.totalCost,
+          Boolean(bookingData.failPaymentForTest)
+        );
         if (!paymentResult.success) {
-          booking.status = 'Cancelled';
-          throw new AppError('Payment failed', 'The payment step failed and the booking was cancelled', 'Payment gateway integration is not yet complete', StatusCodes.PAYMENT_REQUIRED);
+          throw new AppError(
+            'Payment failed',
+            'The payment step failed and the booking was cancelled',
+            'Payment gateway integration is not yet complete',
+            StatusCodes.PAYMENT_REQUIRED
+          );
         }
 
         booking.status = 'Booked';
@@ -66,15 +100,26 @@ class BookingService {
         });
         return createdBooking;
       } catch (error) {
+        if (seatsDecremented) {
+          try {
+            await axios.patch(`${FLIGHT_SERVICE_PATH}/${bookingData.flightId}`, {
+              incrementSeats: Number(bookingData.noOfSeats),
+              reason: 'booking-failed-rollback'
+            });
+            console.log(`[Compensation] Successfully rolled back ${bookingData.noOfSeats} seats for flight ${bookingData.flightId}`);
+          } catch (compError) {
+            console.error(`[Compensation Failed] Could not restore seats for flight ${bookingData.flightId}:`, compError.message);
+          }
+        }
+
         if (error.isOperational) {
           throw error;
         }
 
-        booking.status = 'Cancelled';
         throw new AppError(
           'Seat reservation failed',
           'The flight seat reservation could not be completed, so the booking was cancelled',
-          'FlightsAndSearch must expose an atomic conditional decrement endpoint for reservation-safe seat updates',
+          error.response?.data?.message || error.message || 'Seat update error',
           StatusCodes.CONFLICT
         );
       }
@@ -112,6 +157,51 @@ class BookingService {
     }
 
     return booking;
+  }
+
+  async getBookingOutbox(userId, bookingId) {
+    const booking = await this.bookingRepository.findById(bookingId);
+
+    if (!booking) {
+      throw new AppError('Booking not found', 'The requested booking could not be found', 'Please check the booking id', StatusCodes.NOT_FOUND);
+    }
+
+    if (booking.userId !== Number(userId)) {
+      throw new AppError('Forbidden', 'You are not allowed to access this booking outbox event', 'Bookings are scoped to the authenticated user', StatusCodes.FORBIDDEN);
+    }
+
+    const targetId = Number(bookingId);
+    const candidateOutboxes = await Outbox.findAll({
+      order: [['id', 'DESC']]
+    });
+
+    const outbox = candidateOutboxes.find(o => {
+      try {
+        const payload = JSON.parse(o.payload);
+        return Number(payload.bookingId) === targetId;
+      } catch (_) {
+        return false;
+      }
+    });
+
+    if (!outbox) {
+      throw new AppError('Outbox event not found', 'No outbox event found for this booking', 'Check if outbox event was recorded', StatusCodes.NOT_FOUND);
+    }
+
+    let parsedPayload = {};
+    try {
+      parsedPayload = JSON.parse(outbox.payload);
+    } catch (_) {
+      parsedPayload = { raw: outbox.payload };
+    }
+
+    return {
+      id: outbox.id,
+      eventType: outbox.eventType,
+      status: outbox.status,
+      payload: parsedPayload,
+      createdAt: outbox.createdAt
+    };
   }
 
   async cancelBooking(userId, bookingId) {
