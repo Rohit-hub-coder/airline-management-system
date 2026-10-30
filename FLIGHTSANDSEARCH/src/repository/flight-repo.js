@@ -1,6 +1,6 @@
 const { Op } = require('sequelize');
 const CrudRepository = require('./crud-repo');
-const { Flight } = require('../models/index');
+const { Flight, sequelize } = require('../models/index');
 
 class FlightRepository extends CrudRepository {
     constructor() {
@@ -80,24 +80,55 @@ class FlightRepository extends CrudRepository {
 
     async update(flightId, data) {
         try {
+            if (data.decrementSeats !== undefined) {
+                const seatsToDecrement = Number(data.decrementSeats);
+                if (!Number.isInteger(seatsToDecrement) || seatsToDecrement <= 0) {
+                    throw { error: 'decrementSeats must be a positive integer' };
+                }
+
+                // Enforce totalSeats >= N unconditionally so capacity can never drop below zero
+                const whereClause = {
+                    id: flightId,
+                    totalSeats: { [Op.gte]: seatsToDecrement }
+                };
+
+                const [affectedRows] = await Flight.update(
+                    { totalSeats: sequelize.literal(`totalSeats - ${seatsToDecrement}`) },
+                    { where: whereClause }
+                );
+
+                if (affectedRows === 0) {
+                    const flightExists = await Flight.findByPk(flightId);
+                    if (!flightExists) {
+                        throw { error: 'Flight not found' };
+                    }
+                    throw { error: 'Insufficient seats available' };
+                }
+
+                return await Flight.findByPk(flightId);
+            }
+
+            if (data.incrementSeats !== undefined) {
+                const seatsToIncrement = Number(data.incrementSeats);
+                if (!Number.isInteger(seatsToIncrement) || seatsToIncrement <= 0) {
+                    throw { error: 'incrementSeats must be a positive integer' };
+                }
+
+                const [affectedRows] = await Flight.update(
+                    { totalSeats: sequelize.literal(`totalSeats + ${seatsToIncrement}`) },
+                    { where: { id: flightId } }
+                );
+
+                if (affectedRows === 0) {
+                    throw { error: 'Flight not found' };
+                }
+
+                return await Flight.findByPk(flightId);
+            }
+
             const flight = await Flight.findByPk(flightId);
             if (!flight) {
                 throw { error: 'Flight not found' };
-            }
-            if (data.decrementSeats !== undefined) {
-                const seatsToDecrement = Number(data.decrementSeats);
-                if (data.reserveIfAvailable && flight.totalSeats < seatsToDecrement) {
-                    throw { error: 'Insufficient seats available' };
-                }
-                await flight.decrement('totalSeats', { by: seatsToDecrement });
-                await flight.reload();
-                return flight;
-            }
-            if (data.incrementSeats !== undefined) {
-                const seatsToIncrement = Number(data.incrementSeats);
-                await flight.increment('totalSeats', { by: seatsToIncrement });
-                await flight.reload();
-                return flight;
             }
             await Flight.update(data, { where: { id: flightId } });
             await flight.reload();
